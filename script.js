@@ -55,6 +55,10 @@ let currentSessionPath = null;
 const PING_PROXY_URL = "https://script.google.com/macros/s/AKfycbygv94lFvvLGk0xTMVXXSyQWqn6dz9M-xT8Xgx_2vmF4Cak-rzRTLc-CzmRwaXPIJXE/exec"; 
 let pingVisualTimeout = null;
 
+// Subscription Status Tracking
+let subscriptionExpired = false;
+let lastCheckedDaysLeft = null;
+
 // पासवर्ड को सुरक्षित करने के लिए SHA-256 हैशिंग फंक्शन
 async function hashPassword(string) {
     const utf8 = new TextEncoder().encode(string);
@@ -76,8 +80,92 @@ function getPersistentDeviceId() {
 // Initialize Icons on First Load
 lucide.createIcons();
 
+// ========== SUBSCRIPTION EXPIRY VALIDATION FUNCTIONS ==========
+
+function checkSubscriptionValidity() {
+    if (!lastSnapshotData || !lastSnapshotData.AppStats) return false;
+    
+    const data = lastSnapshotData.AppStats;
+    const numericDate = Number(data.approved_date);
+    const approvedDate = Number.isFinite(numericDate)
+        ? new Date(numericDate)
+        : new Date(data.approved_date);
+    
+    // Check if approved_date is valid
+    if (isNaN(approvedDate.getTime())) {
+        subscriptionExpired = true;
+        lastCheckedDaysLeft = 'invalid';
+        return false;
+    }
+    
+    const expireDate = new Date(approvedDate);
+    expireDate.setDate(approvedDate.getDate() + 30);
+    
+    const now = new Date();
+    const timeDiff = expireDate.getTime() - now.getTime();
+    const daysLeft = Math.ceil(timeDiff / (1000 * 3600 * 24));
+    
+    lastCheckedDaysLeft = daysLeft;
+    
+    if (daysLeft <= 0) {
+        subscriptionExpired = true;
+        return false;
+    }
+    
+    subscriptionExpired = false;
+    return true;
+}
+
+function showSubscriptionExpiredPopup() {
+    const popup = document.getElementById('subscription-expired-modal');
+    if (popup) {
+        popup.classList.remove('hidden');
+        document.body.style.overflow = 'hidden';
+        document.documentElement.style.overscrollBehaviorY = 'none';
+    }
+}
+
+function hideSubscriptionExpiredPopup() {
+    const popup = document.getElementById('subscription-expired-modal');
+    if (popup) {
+        popup.classList.add('hidden');
+        document.body.style.overflow = '';
+        document.documentElement.style.overscrollBehaviorY = '';
+    }
+}
+
+function openContactPage() {
+    // Open contact or support page - can be customized
+    alert('📞 संपर्क करें:\n\n@sohanlalde');
+}
+
+function forceLogoutAllAdmins() {
+    localStorage.removeItem('isLoggedIn');
+    localStorage.removeItem('username');
+    localStorage.removeItem('activeTab');
+    localStorage.removeItem('currentSessionId');
+    if (adminStatusRef) adminStatusRef.off();
+}
+
+async function loadAppStats() {
+    const snapshot = await database.ref('AppStats').once('value');
+    lastSnapshotData = lastSnapshotData || {};
+    lastSnapshotData.AppStats = snapshot.val() || {};
+    return lastSnapshotData.AppStats;
+}
+
 // Check login status on page load
-window.addEventListener('DOMContentLoaded', () => {
+window.addEventListener('DOMContentLoaded', async () => {
+    await loadAppStats();
+    const subscriptionValid = checkSubscriptionValidity();
+    
+    if (!subscriptionValid) {
+        // Subscription expired/invalid - show popup and block login
+        showSubscriptionExpiredPopup();
+        forceLogoutAllAdmins();
+        return;
+    }
+    
     const isLoggedIn = localStorage.getItem('isLoggedIn') === 'true';
     const savedUsername = localStorage.getItem('username');
 
@@ -327,6 +415,12 @@ function updateDashboardUI() {
             if (approvedEl) approvedEl.innerText = `Approved: ${approvedDate.toLocaleDateString('en-GB')}`;
             if (expireEl) expireEl.innerText = `Expired: ${expireDate.toLocaleDateString('en-GB')}`;
             if (daysLeftEl) daysLeftEl.innerText = `${daysLeft > 0 ? daysLeft : 0} Days Left`;
+            
+            // NEW: Check subscription validity and logout if expired
+            if (!checkSubscriptionValidity()) {
+                showSubscriptionExpiredPopup();
+                forceLogoutAllAdmins();
+            }
         }
 
         // Note: Admin Status Logs container was removed from Home Fragment
@@ -966,10 +1060,21 @@ function startAdminStatusMonitor(username, enteredPassword = null) {
     });
 }
 
-function attemptLogin() {
+async function attemptLogin() {
+    if (!lastSnapshotData || !lastSnapshotData.AppStats) {
+        await loadAppStats();
+    }
+
+    const subscriptionValid = checkSubscriptionValidity();
+    const errorMsg = document.getElementById('login-error');
+    
+    if (!subscriptionValid) {
+        showSubscriptionExpiredPopup();
+        return;
+    }
+    
     const username = document.getElementById('username').value.trim();
     const pass = document.getElementById('password').value;
-    const errorMsg = document.getElementById('login-error');
 
     if (username === "" || pass === "") {
         errorMsg.innerText = "Username and passcode required.";
